@@ -1,0 +1,113 @@
+import logging
+import os
+import pandas
+import csv
+from progress.bar import Bar
+
+
+import libplanon
+import zeep 
+import requests
+
+import resources.logger
+
+get_token = libplanon.TokenManager(
+    url=os.environ.get("PLN_URL"),
+    username=os.environ.get("PLN_USR"),
+    password=os.environ.get("PLN_PWD")
+).get_token
+
+pln_client = libplanon.APIManager(url=os.environ.get("PLN_URL"), services=["UsrBuilding"])
+
+pln_building_client = pln_client["UsrBuilding"]
+
+# ===========================================================================================
+# MAIN
+# Read CS Building & FOM_String from excel and convert them to Json
+#Read the buildings from CSV and assign freestring45 of pln_building_client to value from CSV 
+# ===========================================================================================
+log = logging.getLogger(__name__)
+
+df_csv = pandas.read_csv('resources/semi_CS.csv')
+dataframe = df_csv.where(pandas.notnull(df_csv), None)
+building_dict = dict(zip(dataframe["Building"], dataframe["FOM_String"]))
+
+failed = []
+succeeded = []
+skipped = []
+mismatched=[]
+success_count=0
+fail_count=0
+skipped_count=0
+mismatch_count=0
+
+rows=[]
+with open(file='resources/semi_CS.csv') as file:
+    reader = csv.DictReader(file, delimiter=',')
+
+    for row in reader:
+       rows.append(row)
+
+
+for data in rows:
+    building_name= data['Building']
+    FOM_String= data['FOM_String']
+    log.info(f"Processing account {building_name}")
+    
+    try:
+        pln_buildings, = pln_building_client.find(get_token(), {
+        'fieldFilters': [{
+        'fieldName': 'Code',
+        'operator': 'equals',
+        'filterValue': building_name,
+
+        }]
+    })
+    
+        pln_building = pln_building_client.read(get_token(), pln_buildings)
+            
+        if FOM_String!=None :
+          # pln_building['freeString45'] = ';'+ FOM_String
+            pln_building['freeString45'] = FOM_String
+            pln_building_client.save(get_token(),pln_building)
+                                        
+            if len(pln_building['freeString45'])==30:
+                succeeded.append(data)
+                success_count=success_count+1
+                log.info(f"FOM Chartstring {FOM_String} updated for {building_name}")
+ 
+                    
+        elif FOM_String==None :
+            log.info(f"Record skipped for {building_name} as it already has no data")
+            skipped.append(data)
+            skipped_count=skipped_count+1
+                    
+        else:
+            log.info(f"Record skipped for {building_name} due to mismatch in data {FOM_String} ")
+            mismatched.append(data)
+            mismatch_count=mismatch_count+1
+
+    except Exception as ex:
+        exception = ex
+        fail_count=fail_count+1
+        failed.append(data)
+        log.error(f"Record failed to update with Exception: {exception}")
+
+
+log.info(f"Total records succeeded: {success_count}")
+log.info(f"Total records skipped: {skipped_count}")
+log.info(f"Total records mismatched: {mismatch_count}")
+log.info(f"Total records failed: {fail_count}")
+
+
+succeeded_df = pandas.json_normalize(succeeded)
+succeeded_df.to_excel("resources/succeeded.xlsx", index=False)
+
+skipped_df = pandas.json_normalize(skipped)
+skipped_df.to_excel("resources/skipped.xlsx", index=False)
+
+failed_df = pandas.json_normalize(mismatched)
+failed_df.to_excel("resources/mismatch.xlsx", index=False)
+
+failed_df = pandas.json_normalize(failed)
+failed_df.to_excel("resources/failed.xlsx", index=False)
